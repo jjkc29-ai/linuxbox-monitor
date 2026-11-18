@@ -1,6 +1,6 @@
 {
   "name": "linuxbox-monitor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A live, slightly playful pane for a Linux box you reach over SSH: load, memory, drives, batch jobs, Plex playback vs background analysis, and drive health",
   "license": "MIT",
   "types": "./types/index.d.ts",

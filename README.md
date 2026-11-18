@@ -40,6 +40,7 @@ PLEX_URL=http://127.0.0.1:32400
 BOX_HEALTH_LOG=~/disk-health.log     # last line with key=value pairs: total_bad_sectors, new_bad_sectors, ext4_errors, mount
 BOX_HEALTH_ALERT=~/DISK-ALERT.txt    # a file whose recent change flags an alert
 BOX_HEALTH_NAME=media                # which drive the health log is about
+BOX_HEALTH_EXTRA="usb=~/usb-health.log:~/USB-ALERT.txt"  # more drives: Name=log[:alert], comma-separated; also reads usb_resets, timeouts, io_errors, fs_errors
 BOX_CONTAINER=myapp                  # a docker container whose status goes in the footer
 ```
 

@@ -91,6 +91,29 @@ if hl and os.path.exists(hl):
 ha = home(E("BOX_HEALTH_ALERT", ""))
 if ha and os.path.exists(ha): o["overflowAlert"] = os.path.getmtime(ha)
 
+# Every monitored drive, for the health card: the one above plus BOX_HEALTH_EXTRA, a comma-separated
+# list of Name=logfile[:alertfile]. Each log's last line holds key=value pairs (any keys; the pane knows
+# total_bad_sectors, new_bad_sectors, ext4_errors, usb_resets, timeouts, io_errors, fs_errors, mount).
+def health_entry(name, log, alert):
+    log, alert = home(log), home(alert)
+    if not log or not os.path.exists(log): return None
+    try:
+        line = open(log).read().strip().splitlines()[-1]
+    except Exception:
+        return None
+    kv = dict(p.split("=", 1) for p in line.split() if "=" in p)
+    if "drive_not_found" in line: kv["mount"] = "missing"
+    return {"name": name, "date": line[:16], "kv": kv,
+            "alert": os.path.getmtime(alert) if alert and os.path.exists(alert) else None}
+o["health"] = []
+first = health_entry(o["healthName"], E("BOX_HEALTH_LOG", ""), E("BOX_HEALTH_ALERT", ""))
+if first: o["health"].append(first)
+for item in [p for p in E("BOX_HEALTH_EXTRA", "").split(",") if "=" in p]:
+    name, rest = item.split("=", 1)
+    log, _, alert = rest.partition(":")
+    h = health_entry(name.strip(), log.strip(), alert.strip())
+    if h: o["health"].append(h)
+
 # A docker container to show in the footer (BOX_CONTAINER=name)
 c = E("BOX_CONTAINER", "")
 o["container"] = c

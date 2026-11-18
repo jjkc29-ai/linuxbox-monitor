@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BoxStatus, Snapshot } from '../types'
+import type { BoxStatus, Health, Snapshot } from '../types'
 
 const PANE = 'linuxbox'
 const EVERY_MS = 60_000
@@ -102,7 +102,7 @@ function drives(s: BoxStatus): string {
     const color = d.freeGB < 30 ? C.red : d.freeGB < 100 ? C.amber : C.green
     const used = (d.usedPct ?? 0) / 100
     const bw = 170
-    const hurt = s.overflow && d.name === s.healthName ? `<text x="72" y="${y + 11}" font-size="11">🩹</text>` : ''
+    const hurt = healthList(s).some(h => h.name === d.name) ? `<text x="72" y="${y + 11}" font-size="11">🩹</text>` : ''
     return `<text x="16" y="${y + 10}" fill="${C.text}" font-size="12">${esc(d.name)}</text>${hurt}
       <rect x="100" y="${y}" width="${bw}" height="13" rx="4" fill="${C.track}"/>
       <rect x="100" y="${y}" width="${(bw * used).toFixed(1)}" height="13" rx="4" fill="${color}" opacity="0.85"/>
@@ -181,22 +181,53 @@ function plex(s: BoxStatus): string | null {
   return card(y + 4, title(16, 22, 'Plex') + body)
 }
 
-// ---------- overflow drive health, with a heartbeat
-function overflow(s: BoxStatus): string | null {
-  const o = s.overflow
-  const alertRecent = !!s.overflowAlert && Date.now() / 1000 - s.overflowAlert < 2 * 86400
-  if (!o) return null
-  const hname = `${s.healthName ?? "drive"} health`
-  const bad = o.new !== '0' || o.ext4Errors !== '0' || o.mount !== 'ok'
-  const color = bad ? C.red : alertRecent ? C.amber : C.green
-  const beat = bad ? '0.6s' : '1.6s'
-  const status = bad ? 'Getting worse — check it' : alertRecent ? 'Stable · recent alert' : 'Stable'
-  return card(76, `${title(16, 22, hname)}
-    <g transform="translate(30,50)"><g><path d="M0 6 C-14 -6 -8 -18 0 -10 C8 -18 14 -6 0 6z" fill="${color}"/>
-      <animateTransform attributeName="transform" type="scale" values="1;1.18;1;1.1;1" dur="${beat}" repeatCount="indefinite"/></g></g>
-    <polyline points="56,48 90,48 98,36 106,60 114,44 120,48 ${W - 16},48" fill="none" stroke="${color}" stroke-width="2" opacity="0.6"/>
-    <text x="56" y="30" fill="${color}" font-size="12" font-weight="700">${esc(status)}</text>
-    <text x="56" y="66" fill="${C.dim}" font-size="10">${esc(o.badSectors)} bad sectors (${esc(o.new)} new) · ext4 errors ${esc(o.ext4Errors)} · checked ${esc(o.date.slice(5))}</text>`)
+// ---------- drive health, one heartbeat per monitored drive
+function healthList(s: BoxStatus): Health[] {
+  if (s.health) return s.health
+  const o = s.overflow // older box-status.sh: a single drive
+  if (!o) return []
+  return [{ name: s.healthName ?? 'drive', date: o.date, alert: s.overflowAlert,
+    kv: { total_bad_sectors: o.badSectors, new_bad_sectors: o.new, ext4_errors: o.ext4Errors, mount: o.mount } }]
+}
+function verdict(h: Health): { level: 'bad' | 'warn' | 'ok'; status: string; detail: string } {
+  const k = h.kv
+  const n = (key: string) => Number(k[key] ?? 0) || 0
+  const alertRecent = !!h.alert && Date.now() / 1000 - h.alert < 2 * 86400
+  const parts: string[] = []
+  if (k.total_bad_sectors !== undefined) parts.push(`${k.total_bad_sectors} bad sectors (${k.new_bad_sectors ?? 0} new)`)
+  if (k.ext4_errors !== undefined) parts.push(`ext4 errors ${k.ext4_errors}`)
+  if (k.io_errors !== undefined) parts.push(`read errors ${k.io_errors}`)
+  if (k.usb_resets !== undefined && (n('usb_resets') > 0 || k.total_bad_sectors === undefined)) parts.push(`USB drop-outs ${k.usb_resets}`)
+  if (k.fs_errors !== undefined && n('fs_errors') > 0) parts.push(`fs errors ${k.fs_errors}`)
+  parts.push(`checked ${h.date.slice(5)}`)
+  const mountBad = k.mount !== undefined && k.mount !== 'ok'
+  const worse = n('new_bad_sectors') > 0 || n('ext4_errors') > 0 || n('fs_errors') > 0
+  if (mountBad) return { level: 'bad', status: k.mount === 'missing' ? 'Not connected' : 'Not mounted', detail: parts.join(' · ') }
+  if (worse) return { level: 'bad', status: 'Getting worse — check it', detail: parts.join(' · ') }
+  if (n('io_errors') > 0) return { level: 'warn', status: `Dropping out · ${n('io_errors')} failed reads in 24h`, detail: parts.join(' · ') }
+  if (n('usb_resets') > 0) return { level: 'warn', status: `Shaky connection · ${n('usb_resets')} drop-outs in 24h`, detail: parts.join(' · ') }
+  if (alertRecent) return { level: 'warn', status: 'Stable · recent alert', detail: parts.join(' · ') }
+  return { level: 'ok', status: 'Stable', detail: parts.join(' · ') }
+}
+function health(s: BoxStatus): string | null {
+  const list = healthList(s)
+  if (!list.length) return null
+  const rowH = 52
+  const rows = list.map((h, i) => {
+    const v = verdict(h)
+    const color = v.level === 'bad' ? C.red : v.level === 'warn' ? C.amber : C.green
+    const beat = v.level === 'bad' ? '0.6s' : v.level === 'warn' ? '1.0s' : '1.6s'
+    const y = 34 + i * rowH
+    const spike = v.level === 'ok' ? '98,8 106,26 114,12' : '96,0 102,30 108,4 114,24'
+    return `<g transform="translate(0,${y})">
+      <g transform="translate(30,22)"><g><path d="M0 6 C-14 -6 -8 -18 0 -10 C8 -18 14 -6 0 6z" fill="${color}"/>
+        <animateTransform attributeName="transform" type="scale" values="1;1.18;1;1.1;1" dur="${beat}" repeatCount="indefinite"/></g></g>
+      <text x="56" y="8" fill="${C.text}" font-size="12" font-weight="700">${esc(h.name)}</text>
+      <text x="${W - 16}" y="8" text-anchor="end" fill="${color}" font-size="11" font-weight="700">${esc(cut(v.status, 42))}</text>
+      <polyline points="56,18 90,18 ${spike} 120,18 ${W - 16},18" fill="none" stroke="${color}" stroke-width="2" opacity="0.6"/>
+      <text x="56" y="36" fill="${C.dim}" font-size="10">${esc(cut(v.detail, 72))}</text></g>`
+  }).join('')
+  return card(34 + list.length * rowH, title(16, 22, 'Drive health') + rows)
 }
 
 // ---------- status line
@@ -260,14 +291,14 @@ export const register: Register = (on, options) => {
     )
     const enc = encode(s)
     const px = plex(s)
-    const hp = overflow(s)
+    const hp = health(s)
     return (
       <Box flexDirection="column" gap={1}>
         <Svg source={header(s)} alt={`Load ${s.load[0]} on ${s.cores} cores, memory ${s.memAvailGB} of ${s.memTotalGB} GB free, swap ${s.swapUsedGB} GB`} width={W} isInteractive />
         {enc && <Svg source={enc} alt={`Encoding: ${s.batchStatus}`} width={W} isInteractive />}
         {px && <Svg source={px} alt={`Plex: ${s.watching.length} watching, ${s.plexJobs.length} background jobs`} width={W} isInteractive />}
         <Svg source={drives(s)} alt={s.disks.map(d => `${d.name} ${d.freeGB ?? 'not mounted'} GB free`).join(', ')} width={W} />
-        {hp && <Svg source={hp} alt={`${s.healthName ?? "drive"} health: ${s.overflow?.badSectors ?? '?'} bad sectors, ${s.overflow?.new ?? '?'} new`} width={W} isInteractive />}
+        {hp && <Svg source={hp} alt={healthList(s).map(h => { const v = verdict(h); return `${h.name}: ${v.status}, ${v.detail}` }).join('; ')} width={W} isInteractive />}
         <Text dimColor>
           {s.container ? `${s.container} ${s.containerStatus || "not running"} · ` : ""}box time {s.time}{ago !== null ? ` · updated ${ago}s ago` : ''}
           {snap.error ? ` · last check failed: ${snap.error}` : ''}

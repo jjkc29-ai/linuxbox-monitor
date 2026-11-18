@@ -2,7 +2,9 @@ export type Disk = { name: string; freeGB: number | null; usedPct: number | null
 export type Watching = { title: string; user: string; state: string; transcode: string }
 export type PlexJob = { type: string; title: string; item: string; progress: number | null }
 export type Overflow = { date: string; badSectors: string; new: string; ext4Errors: string; mount: string } | null
+export type Health = { name: string; date: string; kv: Record<string, string>; alert: number | null }
 export type BoxStatus = {
+  health?: Health[]
   load: number[]; cores: number; memAvailGB: number; memTotalGB: number; swapUsedGB: number
   disks: Disk[]; batches: string[]; batchStatus: string
   watching: Watching[]; plexJobs: PlexJob[]; plexUp: boolean
