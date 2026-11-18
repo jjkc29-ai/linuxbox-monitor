@@ -1,0 +1,11 @@
+{
+  "name": "linuxbox-monitor",
+  "version": "0.2.0",
+  "description": "A live, slightly playful pane for a Linux box you reach over SSH: load, memory, drives, batch jobs, Plex playback vs background analysis, and drive health",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "host": { "type": "string", "title": "SSH host", "description": "The ssh host or alias of the box (key-based login, no password prompt)", "default": "linuxbox" },
+    "script": { "type": "string", "title": "Status script on the box", "description": "Path of box-status.sh on the box", "default": "~/bin/box-status.sh" }
+  }
+}

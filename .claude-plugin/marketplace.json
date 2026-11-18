@@ -1,0 +1,5 @@
+{
+  "name": "linuxbox-monitor",
+  "owner": { "name": "jjkc29-ai" },
+  "plugins": [{ "name": "linuxbox-monitor", "source": "./" }]
+}
