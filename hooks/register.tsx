@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BoxStatus, Health, Snapshot } from '../types'
+import type { BoxStatus, Health, Job, Snapshot } from '../types'
 
 const PANE = 'linuxbox'
 const EVERY_MS = 60_000
@@ -112,36 +112,51 @@ function drives(s: BoxStatus): string {
   return card(30 + s.disks.length * row + 8, title(16, 22, 'Drives · free space') + rows)
 }
 
-// ---------- the encode as a film strip
+// ---------- every batch: one row each, running first, then waiting
+function jobLabel(j: Job): string {
+  const l = j.label ?? j.desc.replace(/\s*\(waits for [^)]*\)/, '')
+  return (l === j.unit ? l.replace(/^tv-import-/, 'TV import · ').replace(/^hb-/, '') : l).replace(/\s+QSV$/, '')
+}
+function itemName(n: string): string {
+  return n.replace(/\s*\(\d{4}\)/, '').replace(/\s*\((?:480|576|720|1080|2160)p[^)]*\)/i, '').replace(/\.(mkv|mp4|avi|m4v)$/i, '')
+}
+// how many items are finished, from the journal's "[n/total]" (n is the one in progress) or the log's count
+function jobDone(j: Job): number | null {
+  return j.n !== null ? j.n - 1 : j.done ?? null
+}
 function encode(s: BoxStatus): string | null {
   if (s.batches.length === 0) return null
-  const jobs = s.jobs ?? []
-  const cur = jobs.find(j => j.n !== null)
-  const queued = jobs.filter(j => j.n === null)
-  const queueTxt = queued.map(j => j.desc.replace(/\s*\(waits for [^)]*\)/, '').replace(/\s+QSV$/, '')).join(' → ')
-  if (!cur) {
-    return card(queued.length ? 80 : 64, title(16, 22, 'Encoding') +
-      `<text x="16" y="46" fill="${C.dim}" font-size="12">⏳ Starting up…</text>` +
-      (queued.length ? `<text x="16" y="66" fill="${C.dim}" font-size="10">Queued: ${esc(cut(queueTxt, 56))}</text>` : ''))
-  }
-  const n = cur.n as number, total = cur.total as number
-  const m = [null, null, null, cur.name] as unknown as string[]
-  const name = m[3].replace(/\s*\(\d{4}\)/, '').replace(/\s*\((?:480|576|720|1080|2160)p[^)]*\)/i, '').replace(/\.(mkv|mp4|avi)$/i, '')
-  const x0 = 16, sw = W - 32, fw = sw / total
-  const frames = Array.from({ length: total }, (_, i) => {
-    const done = i < n - 1, cur = i === n - 1
-    const fill = done ? C.blue : cur ? C.purple : C.track
-    const anim = cur ? '<animate attributeName="opacity" values="1;0.35;1" dur="1.4s" repeatCount="indefinite"/>' : ''
-    return `<rect x="${(x0 + i * fw + 0.6).toFixed(1)}" y="56" width="${Math.max(1, fw - 1.2).toFixed(1)}" height="18" rx="1.5" fill="${fill}">${anim}</rect>`
+  const jobs = s.jobs ?? s.batches.map(u => ({ unit: u, desc: u, n: null, total: null, name: '' }) as Job)
+  const rowH = 72
+  const rows = jobs.map((j, i) => {
+    const y = 50 + i * rowH
+    const waiting = j.state === 'waiting'
+    const done = jobDone(j), total = j.total
+    const color = waiting ? C.dim : j.unit.startsWith('tv-import') ? C.teal : C.purple
+    const icon = waiting ? '⏳' : j.unit.startsWith('tv-import') ? '📥' : '🎞'
+    const right = waiting ? 'waiting'
+      : j.n !== null && total ? `${j.n} / ${total}`
+      : done !== null && total ? `${done} / ${total}`
+      : done !== null ? `${done} done` : 'starting…'
+    const failTxt = j.failed ? `${j.failed} failed · ` : ''
+    const sub = waiting ? `${total ? total + ' items · ' : ''}after ${(j.waitsFor || 'another job').replace(/\bhb-/g, '').replace(/\btv-import-/g, 'import ')}`
+      : failTxt + (j.name ? `${j.current === false ? 'last: ' : 'now: '}${itemName(j.name)}` : '')
+        + (j.itemPct != null ? ` · ${j.itemPct}%${j.itemEtaMin != null ? `, ~${j.itemEtaMin} min left` : ''}` : '')
+    const bw = W - 32
+    const frac = total && done !== null ? Math.min(1, (done + (j.itemPct ?? 0) / 100) / total) : null
+    const by = y + 11, bh = 9
+    const bar = waiting ? `<rect x="16" y="${by}" width="${bw}" height="${bh}" rx="4" fill="${C.track}" opacity="0.5"/>`
+      : frac !== null ? `<rect x="16" y="${by}" width="${bw}" height="${bh}" rx="4" fill="${C.track}"/>
+          <rect x="16" y="${by}" width="${Math.max(4, bw * frac).toFixed(1)}" height="${bh}" rx="4" fill="${color}"/>
+          <rect x="${(16 + bw * frac).toFixed(1)}" y="${by}" width="${Math.max(3, bw / (total as number)).toFixed(1)}" height="${bh}" rx="2" fill="${color}"><animate attributeName="opacity" values="1;0.25;1" dur="1.4s" repeatCount="indefinite"/></rect>`
+      : `<rect x="16" y="${by}" width="${bw}" height="${bh}" rx="4" fill="${C.track}"/><rect x="16" y="${by}" width="44" height="${bh}" rx="4" fill="${color}"><animate attributeName="x" values="16;${W - 60};16" dur="2.4s" repeatCount="indefinite"/></rect>`
+    return `<text x="16" y="${y}" font-size="16">${icon}</text>
+      <text x="40" y="${y}" fill="${waiting ? C.dim : C.text}" font-size="16" font-weight="700">${esc(cut(jobLabel(j), 24))}</text>
+      <text x="${W - 16}" y="${y}" text-anchor="end" fill="${color}" font-size="16" font-weight="700">${esc(right)}</text>${bar}
+      <text x="16" y="${y + 40}" fill="${C.dim}" font-size="14">${esc(cut(sub, 40))}</text>`
   }).join('')
-  const holes = `<line x1="${x0}" y1="51" x2="${x0 + sw}" y2="51" stroke="${C.dim}" stroke-width="3" stroke-dasharray="3 4" opacity="0.5"/>
-    <line x1="${x0}" y1="79" x2="${x0 + sw}" y2="79" stroke="${C.dim}" stroke-width="3" stroke-dasharray="3 4" opacity="0.5"/>`
-  const others = queued.length ? ` · next: ${esc(cut(queueTxt, 40))}` : ''
-  return card(112, `${title(16, 22, 'Encoding')}
-    <text x="${W - 16}" y="22" text-anchor="end" fill="${C.purple}" font-size="12" font-weight="700">${n} / ${total}</text>
-    <text x="16" y="40" fill="${C.text}" font-size="12">🎞 ${esc(cut(name, 50))}</text>
-    <rect x="${x0 - 4}" y="46" width="${sw + 8}" height="38" rx="4" fill="#0d1018"/>${holes}${frames}
-    <text x="16" y="102" fill="${C.dim}" font-size="10">${Math.round((100 * (n - 1)) / total)}% done${others}</text>`)
+  const running = jobs.filter(j => j.state !== 'waiting').length
+  return card(30 + jobs.length * rowH, `<text x="16" y="24" fill="${C.dim}" font-size="14" font-weight="700" letter-spacing="1">BATCHES · ${running} RUNNING · ${jobs.length - running} WAITING</text>` + rows)
 }
 
 // ---------- Plex: watching versus analysis
@@ -232,8 +247,11 @@ function health(s: BoxStatus): string | null {
 
 // ---------- status line
 function short(s: BoxStatus): string {
-  const cur = (s.jobs ?? []).find(j => j.n !== null)
-  const enc = cur ? ` · 🎞 ${cur.n}/${cur.total}` : ''
+  const live = (s.jobs ?? []).filter(j => j.state !== 'waiting')
+  const enc = live.length ? ' · ' + live.map(j => {
+    const d = jobDone(j)
+    return `${j.unit.startsWith('tv-import') ? '📥' : '🎞'}${j.n !== null ? j.n : d ?? '…'}${j.total ? '/' + j.total : ''}`
+  }).join(' ') : ''
   const plexTxt = !s.plexUp ? ' · Plex DOWN'
     : s.watching.length ? ` · ▶ ${s.watching.length} watching`
     : s.plexJobs.length ? ' · Plex analysing' : ''
@@ -295,7 +313,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column" gap={1}>
         <Svg source={header(s)} alt={`Load ${s.load[0]} on ${s.cores} cores, memory ${s.memAvailGB} of ${s.memTotalGB} GB free, swap ${s.swapUsedGB} GB`} width={W} isInteractive />
-        {enc && <Svg source={enc} alt={`Encoding: ${s.batchStatus}`} width={W} isInteractive />}
+        {enc && <Svg source={enc} alt={`Batches: ${(s.jobs ?? []).map(j => `${jobLabel(j)} ${j.state === 'waiting' ? 'waiting' : `${jobDone(j) ?? '?'}${j.total ? ' of ' + j.total : ''} done`}`).join('; ')}`} width={W} isInteractive />}
         {px && <Svg source={px} alt={`Plex: ${s.watching.length} watching, ${s.plexJobs.length} background jobs`} width={W} isInteractive />}
         <Svg source={drives(s)} alt={s.disks.map(d => `${d.name} ${d.freeGB ?? 'not mounted'} GB free`).join(', ')} width={W} />
         {hp && <Svg source={hp} alt={healthList(s).map(h => { const v = verdict(h); return `${h.name}: ${v.status}, ${v.detail}` }).join('; ')} width={W} isInteractive />}

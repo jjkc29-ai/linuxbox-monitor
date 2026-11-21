@@ -5,7 +5,7 @@
 CONF="${BOX_STATUS_CONF:-$HOME/.config/box-status.env}"
 [ -f "$CONF" ] && set -a && . "$CONF" && set +a
 exec python3 -I - <<'PY'
-import json, os, re, subprocess, urllib.request
+import glob, json, os, re, subprocess, urllib.request
 E = os.environ.get
 def sh(c):
     try: return subprocess.run(c, shell=True, capture_output=True, text=True, timeout=15).stdout.strip()
@@ -41,20 +41,93 @@ for name, mnt in wanted:
         disks.append({"name": name, "freeGB": None, "usedPct": None})
 o["disks"] = disks
 
-# Batch jobs: systemd --user services matching BOX_JOBS (a glob) whose log prints lines like "[3/10] name"
+# Batch jobs: active systemd --user services matching BOX_JOBS (one or more globs, space or comma separated).
+# Progress comes from the journal ("[3/10] name" lines) or, failing that, from BOX_JOB_LOGS/<unit>.log
+# (also tried without an "hb-" prefix) with "START name" / "OK name" / "FAIL name" lines.
+# A service whose only processes are shells and sleep is reported as waiting.
 o["batches"], o["jobs"], o["batchStatus"] = [], [], ""
-pat = E("BOX_JOBS", "")
-if pat:
-    units = [u.replace(".service", "") for u in sh("systemctl --user list-units --type=service --state=active --no-legend %s | awk '{print $1}'" % json.dumps(pat)).split()]
+pats = [p for p in re.split(r"[,\s]+", E("BOX_JOBS", "")) if p]
+logdir = home(E("BOX_JOB_LOGS", ""))
+MEDIA = re.compile(r"\.(mkv|mp4|avi|m4v|ts|mov|wmv|webm)$", re.I)
+SHELLS = {"bash", "sh", "dash", "sleep"}
+def unit_procs(u):
+    cg = sh("systemctl --user show -p ControlGroup --value %s" % u)
+    out = []
+    if not cg: return out
+    for root, _, files in os.walk("/sys/fs/cgroup" + cg):
+        if "cgroup.procs" not in files: continue
+        try: pids = open(os.path.join(root, "cgroup.procs")).read().split()
+        except OSError: continue
+        for pid in pids:
+            try: out.append(open("/proc/%s/comm" % pid).read().strip())
+            except OSError: pass
+    return out
+def item_name(rest):
+    rest = re.sub(r"^\(exists\)\s*", "", rest.strip())
+    rest = re.split(r":\s", rest, maxsplit=1)[0] if not rest.startswith("/") else rest
+    return os.path.basename(rest) if "/" in rest else rest
+if pats:
+    units = [u.replace(".service", "") for u in sh("systemctl --user list-units --type=service --state=active --no-legend %s | awk '{print $1}'"
+                                                    % " ".join(json.dumps(p) for p in pats)).split()]
     o["batches"] = units
     for u in units:
         desc = sh("systemctl --user show -p Description --value %s" % u)
         since = sh("systemctl --user show -p ActiveEnterTimestamp --value %s" % u)
+        since_s = int(sh("date -d %s +%%s" % json.dumps(since)) or 0)
         last = sh(r'''journalctl --user -u %s --since "%s" --no-pager -o cat | grep -E '^\[[0-9]+/[0-9]+\]' | tail -n 1''' % (u, since))
         mm = re.match(r"\[(\d+)/(\d+)\]\s+(.*)", last)
-        o["jobs"].append({"unit": u, "desc": desc, "n": int(mm.group(1)) if mm else None,
-                          "total": int(mm.group(2)) if mm else None, "name": mm.group(3) if mm else ""})
-    o["jobs"].sort(key=lambda j: j["n"] is None)
+        procs = unit_procs(u)
+        waiting = "sleep" in procs and all(p in SHELLS or p.endswith(".sh") for p in procs)
+        waits = re.search(r"waits for ([^)]*)", desc) or re.search(r"is-active -q ([\w@.-]+)", desc)
+        label = u if desc.startswith("[systemd-run]") else re.sub(r"\s*\(waits for [^)]*\)", "", desc)
+        job = {"unit": u, "desc": desc, "label": label, "state": "waiting" if waiting else "running",
+               "waitsFor": waits.group(1).strip() if waits else "",
+               "n": int(mm.group(1)) if mm else None, "total": int(mm.group(2)) if mm else None,
+               "name": mm.group(3) if mm else "", "done": None, "failed": 0}
+        pid = sh("systemctl --user show -p MainPID --value %s" % u)
+        try: args = open("/proc/%s/cmdline" % pid, "rb").read().decode(errors="replace").split("\0")
+        except OSError: args = []
+        if job["total"] is None:  # the media files handed to the service, or the lines of a .list file it was given
+            k = sum(1 for a in args if MEDIA.search(a))
+            for a in args:
+                if not k and a.endswith(".list") and os.path.isfile(a):
+                    k = sum(1 for l in open(a, errors="replace") if l.strip())
+            if k: job["total"] = k
+        if not mm and logdir:
+            tag = next((args[i + 1] for i, a in enumerate(args[:-1]) if a == "--tag"), "")
+            cands = [os.path.join(logdir, c + ".log") for c in (u, re.sub(r"^hb-", "", u))]
+            if tag: cands += sorted(glob.glob(os.path.join(logdir, "*-%s.log" % glob.escape(tag))), key=os.path.getmtime, reverse=True)
+            for lf in cands:
+                if not os.path.exists(lf) or os.path.getmtime(lf) < since_s - 60: continue
+                done = failed = skipped = 0; cur = ""
+                for line in open(lf, errors="replace"):
+                    hdr = re.search(r":\s+(\d+) (?:films|episodes|files|items)\b", line)
+                    if hdr and job["total"] is None: job["total"] = int(hdr.group(1))
+                    t = re.match(r"^(?:[\d:\- ]+\s)?(START|OK|FAIL|SKIP)\b\s*(.*)", line)
+                    if not t: continue
+                    if t.group(1) == "START": cur = item_name(t.group(2))
+                    else:
+                        done += 1; failed += t.group(1) == "FAIL"; skipped += t.group(1) == "SKIP"
+                        if cur and cur in t.group(2): cur = ""
+                        if t.group(1) != "SKIP": job["name"] = re.sub(r"\s+\d+ -> .*$", "", item_name(t.group(2)))
+                job["done"], job["failed"], job["skipped"] = done, failed, skipped
+                if cur: job["name"] = cur
+                job["current"] = bool(cur)
+                if cur:  # how far through the current item, from its ffmpeg log (<logdir>/**/<item>.log)
+                    il = sorted(glob.glob(os.path.join(logdir, "**", glob.escape(cur) + ".log"), recursive=True), key=os.path.getmtime)
+                    if il and os.path.getmtime(il[-1]) >= since_s - 60:
+                        txt = open(il[-1], errors="replace").read()[-200000:]
+                        d = re.search(r"Duration: (\d+):(\d\d):(\d\d)", open(il[-1], errors="replace").read(20000))
+                        ts = re.findall(r"time=(\d+):(\d\d):(\d\d)", txt)
+                        sp = re.findall(r"speed=\s*([\d.]+)x", txt)
+                        if d and ts:
+                            dur = int(d[1]) * 3600 + int(d[2]) * 60 + int(d[3]); h, m_, s_ = ts[-1]
+                            pos = int(h) * 3600 + int(m_) * 60 + int(s_)
+                            if dur: job["itemPct"] = min(100, round(100 * pos / dur))
+                            if dur and sp and float(sp[-1]) > 0: job["itemEtaMin"] = round((dur - pos) / float(sp[-1]) / 60)
+                break
+        o["jobs"].append(job)
+    o["jobs"].sort(key=lambda j: (j["state"] == "waiting", j["n"] is None and j["done"] is None))
 
 # Plex: needs a token file (PLEX_TOKEN_FILE); the token is read here and never printed
 o["plexConfigured"] = False; o["plexUp"] = False; o["watching"] = []; o["plexJobs"] = []

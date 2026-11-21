@@ -11,7 +11,11 @@ export type BoxStatus = {
   jobs?: Job[]; name?: string; plexConfigured?: boolean; healthName?: string; container?: string
   overflow: Overflow; overflowAlert: number | null; containerStatus?: string; time: string
 }
-export type Job = { unit: string; desc: string; n: number | null; total: number | null; name: string }
+export type Job = {
+  unit: string; desc: string; n: number | null; total: number | null; name: string
+  label?: string; state?: 'running' | 'waiting'; waitsFor?: string; done?: number | null; failed?: number; current?: boolean
+  skipped?: number; itemPct?: number; itemEtaMin?: number
+}
 export type Snapshot = { status: BoxStatus | null; error: string; checkedAt: number }
 
 declare module 'claude-code' {

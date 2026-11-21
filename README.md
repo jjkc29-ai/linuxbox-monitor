@@ -34,7 +34,9 @@ With no further setup it shows load, memory and every mounted drive. Optional ex
 BOX_NAME="My server"                 # name under the mascot
 BOX_DRIVES="System=/,Media=/mnt/media" # name=mountpoint pairs; unset = every real filesystem
 BOX_ROOT_NAME=system                 # label for / when auto-detecting
-BOX_JOBS="encode-*"                  # systemd --user services to show; their log should print lines like "[3/10] item name"
+BOX_JOBS="encode-* import-*"         # systemd --user services to show (globs, space separated); progress from journal lines like "[3/10] item name"
+BOX_JOB_LOGS=~/logs                  # optional: or from <dir>/<unit>.log with START name / OK name / FAIL name lines
+                                     # (a service whose only processes are shell scripts and sleep shows as waiting)
 PLEX_TOKEN_FILE=~/.plex-token        # enables the Plex card; the token is read on the box and never sent anywhere else
 PLEX_URL=http://127.0.0.1:32400
 BOX_HEALTH_LOG=~/disk-health.log     # last line with key=value pairs: total_bad_sectors, new_bad_sectors, ext4_errors, mount
