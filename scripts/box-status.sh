@@ -99,17 +99,19 @@ if pats:
             if tag: cands += sorted(glob.glob(os.path.join(logdir, "*-%s.log" % glob.escape(tag))), key=os.path.getmtime, reverse=True)
             for lf in cands:
                 if not os.path.exists(lf) or os.path.getmtime(lf) < since_s - 60: continue
-                done = failed = skipped = 0; cur = ""
+                done = failed = skipped = 0; cur = ""; seen = False
                 for line in open(lf, errors="replace"):
                     hdr = re.search(r":\s+(\d+) (?:films|episodes|files|items)\b", line)
                     if hdr and job["total"] is None: job["total"] = int(hdr.group(1))
                     t = re.match(r"^(?:[\d:\- ]+\s)?(START|OK|FAIL|SKIP)\b\s*(.*)", line)
                     if not t: continue
+                    seen = True
                     if t.group(1) == "START": cur = item_name(t.group(2))
                     else:
                         done += 1; failed += t.group(1) == "FAIL"; skipped += t.group(1) == "SKIP"
                         if cur and cur in t.group(2): cur = ""
                         if t.group(1) != "SKIP": job["name"] = re.sub(r"\s+\d+ -> .*$", "", item_name(t.group(2)))
+                if not seen: continue  # e.g. an empty log of another job that shares the tag
                 job["done"], job["failed"], job["skipped"] = done, failed, skipped
                 if cur: job["name"] = cur
                 job["current"] = bool(cur)
